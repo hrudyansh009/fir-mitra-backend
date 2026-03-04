@@ -24,15 +24,65 @@ app.add_middleware(
 )
 
 # -----------------------------
+# Global index (required by pipeline)
+# -----------------------------
+ANY_INDEX = None  # will be loaded at startup
+
+
+def _try_load_any_index():
+    """
+    Try to load whatever index your pipeline expects.
+    This function is defensive: it won't crash the app if the index isn't present.
+    Adjust the import/loader name if you know the exact loader.
+    """
+    # Try a few common loader names/modules (use the one you actually have)
+    candidates = [
+        ("app.index.any_index", "load_any_index"),
+        ("app.index.loader", "load_any_index"),
+        ("app.index.loader", "load_index"),
+        ("app.pipelines.krupaya_tapasa", "load_any_index"),
+        ("app.pipelines.krupaya_tapasa", "load_index"),
+    ]
+
+    last_err = None
+    for mod_name, fn_name in candidates:
+        try:
+            mod = __import__(mod_name, fromlist=[fn_name])
+            fn = getattr(mod, fn_name, None)
+            if callable(fn):
+                return fn()
+        except Exception as e:
+            last_err = e
+
+    # If nothing found, return None (demo-safe; no 500)
+    if last_err:
+        print(f"[WARN] Could not load any_index (demo will return empty suggestions). Last error: {last_err}")
+    else:
+        print("[WARN] Could not load any_index (no loader found). Demo will return empty suggestions.")
+    return None
+
+
+@app.on_event("startup")
+def startup():
+    global ANY_INDEX
+    ANY_INDEX = _try_load_any_index()
+    if ANY_INDEX is None:
+        print("[WARN] ANY_INDEX is None. krupaya_tapasa will return empty results instead of crashing.")
+    else:
+        print("[OK] ANY_INDEX loaded.")
+
+
+# -----------------------------
 # Health
 # -----------------------------
 @app.get("/")
 def root():
     return {"name": "FIR-Mitra Backend", "version": APP_VERSION}
 
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": APP_VERSION}
+    return {"status": "ok", "version": APP_VERSION, "index_loaded": ANY_INDEX is not None}
 
 
 # -----------------------------
@@ -49,9 +99,9 @@ class SuggestedSection(BaseModel):
     score: Optional[float] = None
     type: Optional[str] = None          # e.g. "scst"
     section_no: Optional[int] = None
-    section_key: Optional[str] = None   # e.g. "scst_section_10"
+    section_key: Optional[str] = None   # e.g. "SCST_10"
     title: Optional[str] = None         # Marathi title
-    snippet: Optional[str] = None       # Marathi snippet
+    snippet: Optional[str] = None       # Marathi snippet (frontend will NOT display)
     lang: Optional[str] = None
 
 
@@ -65,6 +115,7 @@ class TapasaResponse(BaseModel):
 def krupaya_tapasa(req: TapasaRequest):
     """
     Calls your pipeline.
+
     Expected dict shape:
       {
         "missing_words": [...],
@@ -72,7 +123,15 @@ def krupaya_tapasa(req: TapasaRequest):
         "debug": {...}
       }
     """
-    result = krupaya_tapasa_pipeline(text=req.text, k=req.k, lang=req.lang) or {}
+    # DEMO-SAFE: if index didn't load, do not crash the whole endpoint
+    if ANY_INDEX is None:
+        return TapasaResponse(missing_words=[], suggested_sections=[], debug={"warn": "index_not_loaded"})
+
+    # FIX: pass any_index (this is what your traceback demanded)
+    result = (
+        krupaya_tapasa_pipeline(any_index=ANY_INDEX, text=req.text, k=req.k, lang=req.lang)
+        or {}
+    )
 
     missing_words = result.get("missing_words") or []
     suggested = result.get("suggested_sections") or []
