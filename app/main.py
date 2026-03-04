@@ -10,9 +10,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.pipelines.krupaya_tapasa import krupaya_tapasa_pipeline
 from app.any_rag import AnyIndex
 from app.index_backend import SimpleIndexBackend
+from app.pipelines.krupaya_tapasa import krupaya_tapasa_pipeline
 
 VERSION = "5.4.1"
 
@@ -73,13 +73,12 @@ def load_index() -> None:
 
     index_path = _resolve_index_path()
 
-    # Loud debug so you stop guessing on Render
+    # Loud debug so logs are unambiguous on Render
     print(f"[startup] REPO_ROOT={REPO_ROOT}")
     print(f"[startup] INDEX_PATH={index_path}")
     print(f"[startup] exists={index_path.exists()}")
 
     if not index_path.exists():
-        # show directory listing to confirm what Render actually has
         idx_dir = index_path.parent
         listing = []
         try:
@@ -113,11 +112,19 @@ def krupaya_tapasa(req: TapasaRequest):
         raise HTTPException(status_code=500, detail="Index not loaded")
 
     try:
-        return krupaya_tapasa_pipeline(
+        res = krupaya_tapasa_pipeline(
             text=req.text,
             any_index=any_index,
             k=req.k,
             lang=req.lang,
         )
+
+        # DEMO HARDENING:
+        # Your Marathi corpus text is mojibake (à¤...), so do NOT send snippets to UI.
+        for h in res.get("suggested_sections", []):
+            h.pop("snippet", None)
+            h.pop("text", None)
+
+        return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
