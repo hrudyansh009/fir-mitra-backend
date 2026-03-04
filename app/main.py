@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
+from app.index_loader import load_any_index
 from app.pipelines.krupaya_tapasa import krupaya_tapasa_pipeline
 
 APP_VERSION = os.getenv("APP_VERSION", "demo-krupaya+generator")
@@ -65,7 +65,7 @@ def _try_load_any_index():
 @app.on_event("startup")
 def startup():
     global ANY_INDEX
-    ANY_INDEX = _try_load_any_index()
+    ANY_INDEX = load_any_index()
     if ANY_INDEX is None:
         print("[WARN] ANY_INDEX is None. krupaya_tapasa will return empty results instead of crashing.")
     else:
