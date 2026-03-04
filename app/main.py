@@ -1,27 +1,20 @@
 # app/main.py
-
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.any_rag import AnyIndex
-from app.index_backend import SimpleIndexBackend
 from app.pipelines.krupaya_tapasa import krupaya_tapasa_pipeline
 
-VERSION = "5.4.1"
+APP_VERSION = os.getenv("APP_VERSION", "demo-krupaya+generator")
 
-app = FastAPI(title="FIR Mitra API", version=VERSION)
+app = FastAPI(title="FIR-Mitra Backend", version=APP_VERSION)
 
-# ---------------- CORS ----------------
-# Prototype/demo mode:
-# - allow all origins
-# - MUST keep allow_credentials=False with allow_origins=["*"]
+# --- CORS (Render + Vercel) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,101 +23,130 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- ROOT ----------------
+# -----------------------------
+# Health
+# -----------------------------
 @app.get("/")
-def root() -> Dict[str, Any]:
-    return {
-        "service": "FIR Mitra API",
-        "status": "running",
-        "version": VERSION,
-        "docs": "/docs",
-        "health": "/health",
-    }
+def root():
+    return {"name": "FIR-Mitra Backend", "version": APP_VERSION}
 
-
-# ---------------- HEALTH ----------------
 @app.get("/health")
-def health() -> Dict[str, Any]:
-    return {"status": "ok", "version": VERSION}
+def health():
+    return {"status": "ok", "version": APP_VERSION}
 
 
-# ---------------- INDEX ----------------
-any_index: Optional[AnyIndex] = None
-
-# Repo root = Backend/ (one level above app/)
-REPO_ROOT = Path(__file__).resolve().parent.parent  # .../Backend
-DEFAULT_INDEX_PATH = REPO_ROOT / "data" / "index" / "scst_offences_index.jsonl"
-
-
-def _resolve_index_path() -> Path:
-    """
-    Always resolve relative to the repo root (Backend/), not cwd.
-    Allow override via SCST_INDEX_PATH.
-    """
-    env_path = os.getenv("SCST_INDEX_PATH")
-    if env_path:
-        return Path(env_path).expanduser().resolve()
-    return DEFAULT_INDEX_PATH
-
-
-@app.on_event("startup")
-def load_index() -> None:
-    global any_index
-
-    index_path = _resolve_index_path()
-
-    # Loud debug so logs are unambiguous on Render
-    print(f"[startup] REPO_ROOT={REPO_ROOT}")
-    print(f"[startup] INDEX_PATH={index_path}")
-    print(f"[startup] exists={index_path.exists()}")
-
-    if not index_path.exists():
-        idx_dir = index_path.parent
-        listing = []
-        try:
-            if idx_dir.exists():
-                listing = [p.name for p in idx_dir.iterdir()]
-        except Exception:
-            listing = ["<failed to list directory>"]
-
-        raise RuntimeError(
-            f"Index file missing: {index_path} | "
-            f"dir_exists={idx_dir.exists()} | dir_listing={listing}"
-        )
-
-    backend = SimpleIndexBackend(index_path)
-    any_index = AnyIndex(backend)
-
-    print(f"✔ SC/ST index loaded: {len(backend.docs)} sections")
-
-
-# ---------------- REQUEST MODEL ----------------
+# -----------------------------
+# Krupaya Tapasa
+# -----------------------------
 class TapasaRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-    k: int = Field(default=7, ge=1, le=50)
-    lang: str = Field(default="mr")
+    text: str
+    k: int = 7
+    lang: str = "mr"
 
 
-# ---------------- MAIN ENDPOINT ----------------
-@app.post("/krupaya_tapasa")
+class SuggestedSection(BaseModel):
+    id: Optional[int] = None
+    score: Optional[float] = None
+    type: Optional[str] = None          # e.g. "scst"
+    section_no: Optional[int] = None
+    section_key: Optional[str] = None   # e.g. "scst_section_10"
+    title: Optional[str] = None         # Marathi title
+    snippet: Optional[str] = None       # Marathi snippet
+    lang: Optional[str] = None
+
+
+class TapasaResponse(BaseModel):
+    missing_words: List[str] = Field(default_factory=list)
+    suggested_sections: List[SuggestedSection] = Field(default_factory=list)
+    debug: Optional[Dict[str, Any]] = None
+
+
+@app.post("/krupaya_tapasa", response_model=TapasaResponse)
 def krupaya_tapasa(req: TapasaRequest):
-    if any_index is None:
-        raise HTTPException(status_code=500, detail="Index not loaded")
+    """
+    Calls your pipeline.
+    Expected dict shape:
+      {
+        "missing_words": [...],
+        "suggested_sections": [...],
+        "debug": {...}
+      }
+    """
+    result = krupaya_tapasa_pipeline(text=req.text, k=req.k, lang=req.lang) or {}
 
-    try:
-        res = krupaya_tapasa_pipeline(
-            text=req.text,
-            any_index=any_index,
-            k=req.k,
-            lang=req.lang,
-        )
+    missing_words = result.get("missing_words") or []
+    suggested = result.get("suggested_sections") or []
+    debug = result.get("debug")
 
-        # DEMO HARDENING:
-        # Your Marathi corpus text is mojibake (à¤...), so do NOT send snippets to UI.
-        for h in res.get("suggested_sections", []):
-            h.pop("snippet", None)
-            h.pop("text", None)
+    return TapasaResponse(
+        missing_words=list(missing_words),
+        suggested_sections=suggested,
+        debug=debug,
+    )
 
-        return res
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+# -----------------------------
+# Auto FIR Generator
+# -----------------------------
+class GenerateFIRRequest(BaseModel):
+    incident: str = Field(..., description="Short incident summary")
+    lang: str = Field(default="mr")
+    format_id: str = Field(default="FIR")
+    sections: List[str] = Field(default_factory=list)
+    fields: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GenerateFIRResponse(BaseModel):
+    draft: str
+    filled_fields: Dict[str, Any]
+    missing_fields: List[str]
+
+
+def build_fir_template_mr(fields: Dict[str, Any], sections: List[str], incident: str):
+    required = ["date", "time", "place", "victim_name", "accused_name"]
+    missing = [k for k in required if not str(fields.get(k, "")).strip()]
+
+    date = fields.get("date", "________")
+    time = fields.get("time", "________")
+    place = fields.get("place", "________")
+    victim = fields.get("victim_name", "________")
+    accused = fields.get("accused_name", "________")
+    witness = fields.get("witness_name", "________")
+
+    sections_line = ", ".join(sections) if sections else "________"
+
+    draft = f"""\
+नाशिक शहर पोलीस ठाणे
+एफ.आय.आर. (प्रथम माहिती अहवाल)
+
+दिनांक: {date}
+वेळ: {time}
+ठिकाण: {place}
+
+फिर्यादी / पीडित: {victim}
+आरोपी: {accused}
+साक्षीदार: {witness}
+
+लागू कलमे: {sections_line}
+
+घटनावर्णन:
+{incident}
+
+नोंद:
+वरील माहिती माझ्या माहितीप्रमाणे खरी व बरोबर आहे.
+
+स्वाक्षरी (फिर्यादी/पीडित): ____________
+स्वाक्षरी (नोंद घेणारा अधिकारी): ____________
+"""
+    return draft, missing
+
+
+@app.post("/generate_fir", response_model=GenerateFIRResponse)
+def generate_fir(req: GenerateFIRRequest):
+    incident = (req.incident or "").strip()
+    if not incident:
+        return GenerateFIRResponse(draft="", filled_fields=req.fields, missing_fields=["incident"])
+
+    # demo-safe: MR only for now
+    draft, missing = build_fir_template_mr(req.fields, req.sections, incident)
+    return GenerateFIRResponse(draft=draft, filled_fields=req.fields, missing_fields=missing)
