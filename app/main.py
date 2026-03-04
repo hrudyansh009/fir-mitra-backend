@@ -14,7 +14,6 @@ from app.pipelines.krupaya_tapasa import krupaya_tapasa_pipeline
 from app.any_rag import AnyIndex
 from app.index_backend import SimpleIndexBackend
 
-
 VERSION = "5.4.1"
 
 app = FastAPI(title="FIR Mitra API", version=VERSION)
@@ -42,28 +41,30 @@ def root() -> Dict[str, Any]:
         "health": "/health",
     }
 
+
 # ---------------- HEALTH ----------------
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"status": "ok", "version": VERSION}
 
+
 # ---------------- INDEX ----------------
 any_index: Optional[AnyIndex] = None
+
+# Repo root = Backend/ (one level above app/)
+REPO_ROOT = Path(__file__).resolve().parent.parent  # .../Backend
+DEFAULT_INDEX_PATH = REPO_ROOT / "data" / "index" / "scst_offences_index.jsonl"
 
 
 def _resolve_index_path() -> Path:
     """
-    Render sometimes runs with a different working directory.
-    Resolve index path relative to this file, not cwd.
-    app/main.py -> app -> Backend -> data/index/...
+    Always resolve relative to the repo root (Backend/), not cwd.
+    Allow override via SCST_INDEX_PATH.
     """
-    base = Path(__file__).resolve().parents[1]  # .../Backend/app
-    candidate = base.parent / "data" / "index" / "scst_offences_index.jsonl"  # .../Backend/data/index/...
-    # Allow override via env if needed
     env_path = os.getenv("SCST_INDEX_PATH")
     if env_path:
-        return Path(env_path)
-    return candidate
+        return Path(env_path).expanduser().resolve()
+    return DEFAULT_INDEX_PATH
 
 
 @app.on_event("startup")
@@ -72,8 +73,25 @@ def load_index() -> None:
 
     index_path = _resolve_index_path()
 
+    # Loud debug so you stop guessing on Render
+    print(f"[startup] REPO_ROOT={REPO_ROOT}")
+    print(f"[startup] INDEX_PATH={index_path}")
+    print(f"[startup] exists={index_path.exists()}")
+
     if not index_path.exists():
-        raise RuntimeError(f"Index file missing: {index_path}")
+        # show directory listing to confirm what Render actually has
+        idx_dir = index_path.parent
+        listing = []
+        try:
+            if idx_dir.exists():
+                listing = [p.name for p in idx_dir.iterdir()]
+        except Exception:
+            listing = ["<failed to list directory>"]
+
+        raise RuntimeError(
+            f"Index file missing: {index_path} | "
+            f"dir_exists={idx_dir.exists()} | dir_listing={listing}"
+        )
 
     backend = SimpleIndexBackend(index_path)
     any_index = AnyIndex(backend)
