@@ -61,6 +61,7 @@ def _try_load_any_index():
         print("[WARN] Could not load any_index (no loader found). Demo will return empty suggestions.")
     return None
 
+ANY_INDEX = None
 
 @app.on_event("startup")
 def startup():
@@ -70,8 +71,6 @@ def startup():
         print("[WARN] ANY_INDEX is None. krupaya_tapasa will return empty results instead of crashing.")
     else:
         print("[OK] ANY_INDEX loaded.")
-
-
 # -----------------------------
 # Health
 # -----------------------------
